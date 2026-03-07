@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aquabot-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  aquabot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aquabot-app
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      BAILEYS_AUTH_FOLDER: /app/baileys-auth
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./baileys-auth:/app/baileys-auth
+
+volumes:
+  redis-data:
