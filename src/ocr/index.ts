@@ -1,11 +1,9 @@
 export { OcrPipeline } from './pipeline';
-export { ClaudeVisionClient } from './claude-vision.client';
-export { OcrNormalizer } from './normalizer';
+export { GeminiVisionClient } from './gemini-vision.client';
 export { OcrValidator } from './validator';
 export type {
-  RawOcrResult,
+  OcrData,
   NormalizedOcrResult,
-  OcrField,
-  OcrFieldWithUnit,
   OcrPipelineInput,
+  productionDataSchema,
 } from './types';

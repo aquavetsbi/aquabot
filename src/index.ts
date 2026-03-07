@@ -4,12 +4,14 @@ import express from 'express';
 import { logger } from './shared/logger';
 import { RedisClient } from './infrastructure/redis.client';
 import { SupabaseRepo } from './infrastructure/supabase.client';
-import { ClaudeVisionClient } from './ocr/claude-vision.client';
-import { OcrNormalizer } from './ocr/normalizer';
+import { GeminiVisionClient } from './ocr/gemini-vision.client';
 import { OcrValidator } from './ocr/validator';
 import { OcrPipeline } from './ocr/pipeline';
 import { WhatsAppProviderFactory } from './whatsapp/factory';
 import { MessageGatewayService } from './gateway/message-gateway.service';
+import { GeminiClient } from './ai/gemini.client';
+import { ChatService } from './ai/chat.service';
+import { DraftService } from './ocr/draft.service';
 
 // ─── HTTP server (health check + Twilio webhook) ──────────────────────────────
 
@@ -24,6 +26,12 @@ app.get('/health', (_req, res) => {
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function bootstrap(): Promise<void> {
+  // @ai-sdk/google lee GOOGLE_GENERATIVE_AI_API_KEY; si no está definida, la
+  // derivamos de GEMINI_API_KEY para que el usuario solo necesite una clave.
+  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY = config.GEMINI_API_KEY;
+  }
+
   logger.info({ env: config.NODE_ENV, provider: config.WHATSAPP_PROVIDER }, 'AquaBot starting...');
 
   // Infrastructure
@@ -36,11 +44,10 @@ async function bootstrap(): Promise<void> {
     config.SUPABASE_STORAGE_BUCKET,
   );
 
-  // OCR pipeline
-  const vision     = new ClaudeVisionClient(config.ANTHROPIC_API_KEY);
-  const normalizer = new OcrNormalizer();
-  const validator  = new OcrValidator();
-  const ocr        = new OcrPipeline(vision, normalizer, validator);
+  // OCR pipeline (Gemini Vision)
+  const vision    = new GeminiVisionClient();
+  const validator = new OcrValidator();
+  const ocr       = new OcrPipeline(vision, validator);
 
   // WhatsApp provider (via Factory)
   const provider = WhatsAppProviderFactory.create(
@@ -56,8 +63,13 @@ async function bootstrap(): Promise<void> {
         },
   );
 
+  // AI services
+  const gemini   = new GeminiClient(config.GEMINI_API_KEY, config.GEMINI_CHAT_MODEL);
+  const chatSvc  = new ChatService(gemini, redis);
+  const draftSvc = new DraftService(redis);
+
   // Gateway — wires everything together
-  new MessageGatewayService(provider, ocr, redis, db);
+  new MessageGatewayService(provider, ocr, draftSvc, chatSvc, redis, db);
 
   // Start HTTP server
   app.listen(config.PORT, () => {

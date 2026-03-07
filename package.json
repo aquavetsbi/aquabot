@@ -10,10 +10,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.43",
     "@anthropic-ai/sdk": "^0.36.3",
+    "@google/generative-ai": "^0.24.1",
     "@hapi/boom": "^10.0.1",
     "@supabase/supabase-js": "^2.47.10",
     "@whiskeysockets/baileys": "^6.7.18",
+    "ai": "^6.0.116",
     "date-fns": "^4.1.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",

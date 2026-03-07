@@ -7,7 +7,7 @@ import { logger } from '../shared/logger';
 
 export interface CreateUploadInput {
   userId: string;
-  batchId?: string;           // opcional — se resuelve si se puede
+  batchId?: string;
   imageUrl: string;
   whatsappProvider: ProviderType;
   whatsappMsgId: string;
@@ -17,12 +17,11 @@ export interface CreateUploadInput {
 export interface UpdateUploadWithOcrInput {
   uploadId: string;
   result: NormalizedOcrResult;
-  rawOcrText?: string;
 }
 
 export interface CreateProductionRecordInput {
   uploadId: string;
-  batchId?: string;           // nullable si no se pudo resolver
+  batchId?: string;
   result: NormalizedOcrResult;
 }
 
@@ -46,50 +45,95 @@ export class SupabaseRepo {
   private bucket: string;
 
   constructor(url: string, serviceRoleKey: string, bucket: string) {
-    this.db = createClient(url, serviceRoleKey, {
-      auth: { persistSession: false },
-    });
+    this.db = createClient(url, serviceRoleKey, { auth: { persistSession: false } });
     this.bucket = bucket;
   }
 
-  // ─── Profiles (users) ─────────────────────────────────────────────────────
+  // ─── Profiles ─────────────────────────────────────────────────────────────
 
-  /** Resuelve el usuario por número de WhatsApp usando profiles.whatsapp_phone */
+  /**
+   * Busca el usuario por su número de WhatsApp.
+   * Prueba con y sin '+' para tolerar distintos formatos en profiles.
+   */
   async findUserByPhone(phone: string): Promise<{ id: string; orgId: string } | null> {
-    const { data, error } = await this.db
+    const phoneCandidates = Array.from(new Set([
+      phone,
+      phone.startsWith('+') ? phone.slice(1) : `+${phone}`,
+    ]));
+
+    logger.info({ phone, phoneCandidates }, '[findUserByPhone] searching');
+
+    // 1. Buscar por número de teléfono
+    const { data: byPhone, error: phoneError } = await this.db
       .from('profiles')
       .select('id, organization_id')
-      .eq('whatsapp_phone', phone)
+      .in('whatsapp_phone', phoneCandidates)
       .eq('is_active', true)
+      .limit(1)
       .single();
 
-    if (error && error.code !== 'PGRST116') {
-      logger.error({ error, phone }, 'Error finding user by phone');
+    if (phoneError && phoneError.code !== 'PGRST116') {
+      logger.error({ error: phoneError, phone }, '[findUserByPhone] phone query error');
     }
 
-    if (!data) return null;
+    if (byPhone) {
+      logger.info({ found: true, via: 'phone' }, '[findUserByPhone] result');
+      return { id: byPhone.id as string, orgId: byPhone.organization_id as string };
+    }
+    logger.info({ found: false, via: 'phone' }, '[findUserByPhone] result');
+    return null;
+  }
+
+  /**
+   * Auto-registra un número si no existe usando el org ID por defecto.
+   * Solo se llama cuando SUPABASE_DEFAULT_ORG_ID está configurado.
+   */
+  async upsertProfileByPhone(phone: string, defaultOrgId: string): Promise<{ id: string; orgId: string }> {
+    const existing = await this.findUserByPhone(phone);
+    if (existing) return existing;
+
+    const { data, error } = await this.db
+      .from('profiles')
+      .insert({ whatsapp_phone: phone, organization_id: defaultOrgId, is_active: true })
+      .select('id, organization_id')
+      .single();
+
+    if (error) throw new Error(`upsertProfileByPhone: ${error.message}`);
+    logger.info({ phone, orgId: defaultOrgId }, 'Auto-registered new WhatsApp user');
     return { id: data.id as string, orgId: data.organization_id as string };
   }
 
   // ─── Ponds & Batches ──────────────────────────────────────────────────────
 
-  /**
-   * Busca un estanque por nombre (case-insensitive) dentro de la organización.
-   * Usado para resolver automáticamente el estanque del OCR.
-   */
   async findPondByName(orgId: string, pondName: string): Promise<{ id: string } | null> {
     const { data } = await this.db
       .from('ponds')
       .select('id')
       .eq('organization_id', orgId)
-      .ilike('name', pondName.trim())
+      .ilike('name', `%${pondName.trim()}%`)
       .eq('status', 'active')
+      .limit(1)
       .single();
 
     return data ? { id: data.id as string } : null;
   }
 
-  /** Retorna el lote activo más reciente de un estanque. */
+  async listActivePondsByOrg(orgId: string): Promise<Array<{ id: string; name: string }>> {
+    const { data, error } = await this.db
+      .from('ponds')
+      .select('id, name')
+      .eq('organization_id', orgId)
+      .eq('status', 'active')
+      .order('name', { ascending: true });
+
+    if (error) throw new Error(`listActivePondsByOrg: ${error.message}`);
+
+    return (data ?? []).map((pond) => ({
+      id: pond.id as string,
+      name: pond.name as string,
+    }));
+  }
+
   async findActiveBatch(pondId: string): Promise<{ id: string; current_population: number | null } | null> {
     const { data } = await this.db
       .from('batches')
@@ -103,7 +147,7 @@ export class SupabaseRepo {
     return data ? { id: data.id as string, current_population: data.current_population as number | null } : null;
   }
 
-  // ─── Uploads (= mensajes WhatsApp + jobs OCR + resultados) ────────────────
+  // ─── Uploads ──────────────────────────────────────────────────────────────
 
   async createUpload(input: CreateUploadInput): Promise<{ id: string }> {
     const { data, error } = await this.db
@@ -124,59 +168,20 @@ export class SupabaseRepo {
     return { id: data.id as string };
   }
 
-  /**
-   * Actualiza el upload con el resultado del OCR.
-   * - processed_data: valores finales mapeados a nombres de columna de production_records
-   * - ocr_field_confidences: confidence por campo (mismo mapa de keys)
-   * - raw_ocr_text: texto crudo de Claude (para auditoría)
-   */
   async updateUploadWithOcrResult(input: UpdateUploadWithOcrInput): Promise<void> {
-    const { fields } = input.result;
-
-    // Mapa de nombres OCR (español) → columnas de production_records (inglés)
-    const processedData = {
-      record_date:     fields.fecha.value,
-      pond_name:       fields.estanque.value,
-      batch_code:      fields.lote.value,
-      feed_kg:         fields.alimento_kg.value,
-      avg_weight_g:    fields.peso_promedio_g.value,
-      mortality_count: fields.mortalidad.value,
-      temperature_c:   fields.temperatura_c.value,
-      oxygen_mg_l:     fields.oxigeno_mgl.value,
-      ammonia_mg_l:    fields.amonio_mgl.value,
-      nitrite_mg_l:    fields.nitritos_mgl.value,
-      nitrate_mg_l:    fields.nitratos_mgl.value,
-      ph:              fields.ph.value,
-      notes:           fields.observaciones.value,
-    };
-
-    const fieldConfidences = {
-      record_date:     fields.fecha.confidence,
-      pond_name:       fields.estanque.confidence,
-      batch_code:      fields.lote.confidence,
-      feed_kg:         fields.alimento_kg.confidence,
-      avg_weight_g:    fields.peso_promedio_g.confidence,
-      mortality_count: fields.mortalidad.confidence,
-      temperature_c:   fields.temperatura_c.confidence,
-      oxygen_mg_l:     fields.oxigeno_mgl.confidence,
-      ammonia_mg_l:    fields.amonio_mgl.confidence,
-      nitrite_mg_l:    fields.nitritos_mgl.confidence,
-      nitrate_mg_l:    fields.nitratos_mgl.confidence,
-      ph:              fields.ph.confidence,
-      notes:           fields.observaciones.confidence,
-    };
+    const { data } = input.result;
 
     await this.db
       .from('uploads')
       .update({
-        status:               input.result.isValid ? 'pending_review' : 'rejected',
-        processed_data:       processedData,
-        ocr_field_confidences: fieldConfidences,
-        ocr_confidence:       input.result.overallConfidence,
-        raw_ocr_text:         input.rawOcrText ?? null,
-        pond_name_raw:        fields.estanque.value,
-        record_date_raw:      fields.fecha.value,
-        rejection_reason:     input.result.isValid
+        status:                input.result.isValid ? 'pending_review' : 'rejected',
+        // processed_data almacena el output completo de Gemini (todos los campos OCR)
+        processed_data:        data,
+        ocr_field_confidences: data.confidence,
+        ocr_confidence:        input.result.overallConfidence,
+        pond_name_raw:         data.pond_name,
+        record_date_raw:       data.record_date,
+        rejection_reason:      input.result.isValid
           ? null
           : input.result.rejectionReasons.join(', '),
       })
@@ -186,28 +191,35 @@ export class SupabaseRepo {
   // ─── Production Records ───────────────────────────────────────────────────
 
   async createProductionRecord(input: CreateProductionRecordInput): Promise<{ id: string }> {
-    const { fields } = input.result;
+    const d = input.result.data;
+    const avgWeightKg = this.normalizeAvgWeightKg(d.avg_weight_g);
 
     const { data, error } = await this.db
       .from('production_records')
       .insert({
         batch_id:        input.batchId ?? null,
         upload_id:       input.uploadId,
-        record_date:     fields.fecha.value ?? new Date().toISOString().split('T')[0],
+        record_date:     d.record_date ?? new Date().toISOString().split('T')[0],
 
-        // Columnas existentes (nombres del schema AquaData)
-        feed_kg:         fields.alimento_kg.value,
-        avg_weight_g:    fields.peso_promedio_g.value,
-        mortality_count: fields.mortalidad.value ?? 0,
-        temperature_c:   fields.temperatura_c.value,
-        oxygen_mg_l:     fields.oxigeno_mgl.value,
-        ammonia_mg_l:    fields.amonio_mgl.value,
-        nitrite_mg_l:    fields.nitritos_mgl.value,
-        nitrate_mg_l:    fields.nitratos_mgl.value,
-        ph:              fields.ph.value,
-        notes:           fields.observaciones.value,
+        // Columnas existentes AquaData
+        feed_kg:         d.feed_kg,
+        avg_weight_kg:   avgWeightKg,
+        mortality_count: d.mortality_count ?? 0,
+        temperature_c:   d.temperature_c,
+        oxygen_mg_l:     d.oxygen_mg_l,
+        ammonia_mg_l:    d.ammonia_mg_l,
+        nitrite_mg_l:    d.nitrite_mg_l,
+        nitrate_mg_l:    d.nitrate_mg_l,
+        ph:              d.ph,
+        notes:           d.notes,
 
-        review_status:   'PENDING_REVIEW',   // columna agregada
+        // Columnas nuevas (migración 002)
+        fish_count:      d.fish_count,
+        phosphate_mg_l:  d.phosphate_mg_l,
+        hardness_mg_l:   d.hardness_mg_l,
+        alkalinity_mg_l: d.alkalinity_mg_l,
+
+        review_status:   'PENDING_REVIEW',
       })
       .select('id')
       .single();
@@ -216,20 +228,27 @@ export class SupabaseRepo {
     return { id: data.id as string };
   }
 
+  /**
+   * El OCR sigue exponiendo avg_weight_g por compatibilidad histórica.
+   * En DB ahora persistimos avg_weight_kg.
+   * - Si el valor parece gramos (> 20), convierte g -> kg.
+   * - Si el valor parece kg (<= 20), lo deja tal cual.
+   */
+  private normalizeAvgWeightKg(avgWeightRaw: number | null): number | null {
+    if (avgWeightRaw === null || Number.isNaN(avgWeightRaw)) return null;
+    if (avgWeightRaw <= 0) return 0;
+
+    const kg = avgWeightRaw > 20 ? avgWeightRaw / 1000 : avgWeightRaw;
+    return Math.round(kg * 1000) / 1000;
+  }
+
   async getProductionRecord(id: string): Promise<Record<string, unknown> | null> {
     const { data } = await this.db
       .from('production_records')
       .select(`
         *,
-        uploads(
-          image_url, sender_phone, processed_data,
-          ocr_confidence, ocr_field_confidences,
-          pond_name_raw, created_at
-        ),
-        batches(
-          id, pond_id, current_population,
-          ponds(id, name, organization_id)
-        )
+        uploads(image_url, sender_phone, processed_data, ocr_confidence, ocr_field_confidences, pond_name_raw, created_at),
+        batches(id, pond_id, current_population, ponds(id, name, organization_id))
       `)
       .eq('id', id)
       .single();
@@ -237,17 +256,18 @@ export class SupabaseRepo {
     return data ?? null;
   }
 
-  async confirmProductionRecord(
-    id: string,
-    updates: Record<string, unknown>,
-  ): Promise<void> {
+  async updateUploadStatus(uploadId: string, status: string): Promise<void> {
+    await this.db.from('uploads').update({ status }).eq('id', uploadId);
+  }
+
+  async cancelUpload(uploadId: string): Promise<void> {
+    await this.db.from('uploads').update({ status: 'cancelled' }).eq('id', uploadId);
+  }
+
+  async confirmProductionRecord(id: string, updates: Record<string, unknown>): Promise<void> {
     await this.db
       .from('production_records')
-      .update({
-        ...updates,
-        review_status: 'CONFIRMED',
-        // confirmed_by: userId  ← agregar cuando haya auth
-      })
+      .update({ ...updates, review_status: 'CONFIRMED' })
       .eq('id', id);
   }
 
@@ -255,17 +275,17 @@ export class SupabaseRepo {
 
   async insertAlert(input: InsertAlertInput): Promise<void> {
     await this.db.from('alerts').insert({
-      organization_id:       input.organizationId,
-      production_record_id:  input.productionRecordId,
-      pond_id:               input.pondId ?? null,
-      batch_id:              input.batchId ?? null,
-      alert_type:            input.alertType,
-      severity:              input.severity,
-      message:               input.message,
-      is_read:               false,
-      parameter_name:        input.parameterName ?? null,
-      parameter_value:       input.parameterValue ?? null,
-      threshold_value:       input.thresholdValue ?? null,
+      organization_id:      input.organizationId,
+      production_record_id: input.productionRecordId,
+      pond_id:              input.pondId ?? null,
+      batch_id:             input.batchId ?? null,
+      alert_type:           input.alertType,
+      severity:             input.severity,
+      message:              input.message,
+      is_read:              false,
+      parameter_name:       input.parameterName ?? null,
+      parameter_value:      input.parameterValue ?? null,
+      threshold_value:      input.thresholdValue ?? null,
     });
   }
 
