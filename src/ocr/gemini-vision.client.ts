@@ -6,6 +6,14 @@ import { BotError } from '../shared/errors';
 import { logger } from '../shared/logger';
 
 export class GeminiVisionClient implements VisionClient {
+  private static readonly OCR_MODELS = [
+    'gemini-2.5-flash',
+    'gemini-3-flash-preview',
+    'gemini-2.5-flash-lite',
+  ] as const;
+
+  private static readonly ATTEMPTS_PER_MODEL = 2;
+
   async extract(imageBuffer: Buffer, mimeType: string): Promise<OcrData> {
     if (!mimeType.startsWith('image/')) {
       throw new BotError('INVALID_IMAGE', `Formato no soportado: ${mimeType}. Envía JPG, PNG o WEBP.`);
@@ -13,20 +21,24 @@ export class GeminiVisionClient implements VisionClient {
 
     logger.debug({ mimeType, sizeKb: Math.round(imageBuffer.length / 1024) }, 'Sending image to Gemini Vision');
 
-    try {
-      // generateObject infiere tipos desde el schema Zod; con schemas muy anidados
-      // TypeScript da TS2589 "type instantiation excessively deep". El cast rompe el ciclo.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { object } = await (generateObject as any)({
-        model: google('gemini-2.5-flash'),
-        schema: productionDataSchema,
-        messages: [
-          {
-            role: 'user',
-            content: [
+    let lastError: unknown;
+
+    for (const modelName of GeminiVisionClient.OCR_MODELS) {
+      for (let attempt = 1; attempt <= GeminiVisionClient.ATTEMPTS_PER_MODEL; attempt += 1) {
+        try {
+          // generateObject infiere tipos desde el schema Zod; con schemas muy anidados
+          // TypeScript da TS2589 "type instantiation excessively deep". El cast rompe el ciclo.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { object } = await (generateObject as any)({
+            model: google(modelName),
+            schema: productionDataSchema,
+            messages: [
               {
-                type: 'text',
-                text: `Analiza esta imagen de un reporte acuícola de campo. Extrae los siguientes datos de producción:
+                role: 'user',
+                content: [
+                  {
+                    type: 'text',
+                    text: `Analiza esta imagen de un reporte acuícola de campo. Extrae los siguientes datos de producción:
 
 - Fecha del registro
 - Número de peces (cantidad total en el estanque)
@@ -51,29 +63,41 @@ NO intentes extraer el nombre del estanque desde la imagen: devuelve siempre pon
 Los campos de dureza y alcalinidad son opcionales; si no aparecen, devuelve null y confianza 0.
 
 IMPORTANTE: Si la fecha está en formato DD/MM/YYYY, conviértela a YYYY-MM-DD.`,
-              },
-              {
-                type: 'image',
-                image: imageBuffer,
+                  },
+                  {
+                    type: 'image',
+                    image: imageBuffer,
+                  },
+                ],
               },
             ],
-          },
-        ],
-      });
+          });
 
-      logger.debug(
-        { record_date: object.record_date, pond_name: object.pond_name },
-        'Gemini Vision extraction complete',
-      );
+          logger.info(
+            { model: modelName, attempt, record_date: object.record_date, pond_name: object.pond_name },
+            'Gemini Vision extraction complete',
+          );
 
-      return object;
-    } catch (err) {
-      if (err instanceof BotError) throw err;
-      throw new BotError(
-        'OCR_FAILED',
-        'No pude leer el reporte. Por favor envía una foto más clara.',
-        err instanceof Error ? err : undefined,
-      );
+          return object;
+        } catch (err) {
+          lastError = err;
+          logger.warn(
+            {
+              err,
+              model: modelName,
+              attempt,
+              attemptsPerModel: GeminiVisionClient.ATTEMPTS_PER_MODEL,
+            },
+            'Gemini Vision extraction attempt failed',
+          );
+        }
+      }
     }
+
+    throw new BotError(
+      'OCR_FAILED',
+      'No pude leer el reporte. Por favor envía una foto más clara.',
+      lastError instanceof Error ? lastError : undefined,
+    );
   }
 }
