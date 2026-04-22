@@ -6,7 +6,7 @@ import { logger } from '../shared/logger';
 // ─── Input types ──────────────────────────────────────────────────────────────
 
 export interface CreateUploadInput {
-  userId: string;
+  userId?: string | null;
   batchId?: string;
   imageUrl: string;
   whatsappProvider: ProviderType;
@@ -53,34 +53,87 @@ export class SupabaseRepo {
 
   /**
    * Busca el usuario por su número de WhatsApp.
-   * Prueba con y sin '+' para tolerar distintos formatos en profiles.
+   * Busca primero en profiles.phone, luego mantiene compatibilidad con
+   * profiles.whatsapp_phone y finalmente valida la whitelist
+   * organizations.authorized_whatsapp_contacts.
    */
-  async findUserByPhone(phone: string): Promise<{ id: string; orgId: string } | null> {
-    const phoneCandidates = Array.from(new Set([
-      phone,
-      phone.startsWith('+') ? phone.slice(1) : `+${phone}`,
-    ]));
+  async findUserByPhone(phone: string): Promise<{ id: string | null; orgId: string; fullName: string | null } | null> {
+    const phoneCandidates = this.buildPhoneCandidates(phone);
 
     logger.info({ phone, phoneCandidates }, '[findUserByPhone] searching');
 
-    // 1. Buscar por número de teléfono
-    const { data: byPhone, error: phoneError } = await this.db
+    // 1. Buscar por número normalizado en profiles.phone
+    const { data: byProfilePhone, error: profilePhoneError } = await this.db
       .from('profiles')
-      .select('id, organization_id')
+      .select('id, organization_id, full_name')
+      .in('phone', phoneCandidates)
+      .eq('is_active', true)
+      .limit(1)
+      .maybeSingle();
+
+    if (profilePhoneError) {
+      logger.error({ error: profilePhoneError, phone }, '[findUserByPhone] profiles.phone query error');
+    }
+
+    if (byProfilePhone?.organization_id) {
+      logger.info({ found: true, via: 'profiles.phone' }, '[findUserByPhone] result');
+      return {
+        id: byProfilePhone.id as string,
+        orgId: byProfilePhone.organization_id as string,
+        fullName: (byProfilePhone.full_name as string | null) ?? null,
+      };
+    }
+
+    // 2. Compatibilidad con el campo legado profiles.whatsapp_phone
+    const { data: byWhatsappPhone, error: whatsappPhoneError } = await this.db
+      .from('profiles')
+      .select('id, organization_id, full_name')
       .in('whatsapp_phone', phoneCandidates)
       .eq('is_active', true)
       .limit(1)
-      .single();
+      .maybeSingle();
 
-    if (phoneError && phoneError.code !== 'PGRST116') {
-      logger.error({ error: phoneError, phone }, '[findUserByPhone] phone query error');
+    if (whatsappPhoneError) {
+      logger.error({ error: whatsappPhoneError, phone }, '[findUserByPhone] profiles.whatsapp_phone query error');
     }
 
-    if (byPhone) {
-      logger.info({ found: true, via: 'phone' }, '[findUserByPhone] result');
-      return { id: byPhone.id as string, orgId: byPhone.organization_id as string };
+    if (byWhatsappPhone?.organization_id) {
+      logger.info({ found: true, via: 'profiles.whatsapp_phone' }, '[findUserByPhone] result');
+      return {
+        id: byWhatsappPhone.id as string,
+        orgId: byWhatsappPhone.organization_id as string,
+        fullName: (byWhatsappPhone.full_name as string | null) ?? null,
+      };
     }
-    logger.info({ found: false, via: 'phone' }, '[findUserByPhone] result');
+
+    // 3. Validar si el número está autorizado a nivel de organización
+    const { data: organizations, error: organizationsError } = await this.db
+      .from('organizations')
+      .select('id, authorized_whatsapp_contacts');
+
+    if (organizationsError) {
+      logger.error({ error: organizationsError, phone }, '[findUserByPhone] organizations query error');
+      return null;
+    }
+
+    const phoneCandidateSet = new Set(phoneCandidates);
+    const matchedOrganization = (organizations ?? [])
+      .map((organization) => ({
+        orgId: organization.id as string,
+        match: this.findAuthorizedOrganizationContact(organization.authorized_whatsapp_contacts, phoneCandidateSet),
+      }))
+      .find((organization) => organization.match !== null);
+
+    if (matchedOrganization?.match) {
+      logger.info({ found: true, via: 'organizations.authorized_whatsapp_contacts' }, '[findUserByPhone] result');
+      return {
+        id: null,
+        orgId: matchedOrganization.orgId,
+        fullName: matchedOrganization.match.fullName,
+      };
+    }
+
+    logger.info({ found: false }, '[findUserByPhone] result');
     return null;
   }
 
@@ -88,19 +141,109 @@ export class SupabaseRepo {
    * Auto-registra un número si no existe usando el org ID por defecto.
    * Solo se llama cuando SUPABASE_DEFAULT_ORG_ID está configurado.
    */
-  async upsertProfileByPhone(phone: string, defaultOrgId: string): Promise<{ id: string; orgId: string }> {
+  async upsertProfileByPhone(phone: string, defaultOrgId: string): Promise<{ id: string | null; orgId: string; fullName: string | null }> {
     const existing = await this.findUserByPhone(phone);
     if (existing) return existing;
 
+    const preferredPhone = this.selectPreferredProfilePhone(phone);
+
     const { data, error } = await this.db
       .from('profiles')
-      .insert({ whatsapp_phone: phone, organization_id: defaultOrgId, is_active: true })
+      .insert({
+        whatsapp_phone: phone,
+        phone: preferredPhone,
+        organization_id: defaultOrgId,
+        is_active: true,
+      })
       .select('id, organization_id')
       .single();
 
     if (error) throw new Error(`upsertProfileByPhone: ${error.message}`);
     logger.info({ phone, orgId: defaultOrgId }, 'Auto-registered new WhatsApp user');
-    return { id: data.id as string, orgId: data.organization_id as string };
+    return { id: data.id as string, orgId: data.organization_id as string, fullName: null };
+  }
+
+  private buildPhoneCandidates(phone: string): string[] {
+    const trimmed = phone.trim();
+    const withoutJid = trimmed.includes('@') ? (trimmed.split('@')[0] ?? trimmed) : trimmed;
+    const compact = withoutJid.replace(/[^\d+]/g, '');
+    const digits = compact.replace(/\D/g, '');
+
+    const candidates = new Set<string>([trimmed, withoutJid, compact]);
+
+    if (digits) {
+      candidates.add(digits);
+      candidates.add(`+${digits}`);
+    }
+
+    if (digits.length === 10) {
+      candidates.add(`57${digits}`);
+      candidates.add(`+57${digits}`);
+    }
+
+    if (digits.length === 12 && digits.startsWith('57')) {
+      const localDigits = digits.slice(2);
+      candidates.add(localDigits);
+      candidates.add(`+${digits}`);
+      candidates.add(`+${localDigits}`);
+    }
+
+    return Array.from(candidates).filter(Boolean);
+  }
+
+  private selectPreferredProfilePhone(phone: string): string | null {
+    const candidates = this.buildPhoneCandidates(phone);
+    return candidates.find((candidate) => /^\+\d+$/.test(candidate)) ?? null;
+  }
+
+  private findAuthorizedOrganizationContact(
+    authorizedContacts: unknown,
+    phoneCandidateSet: Set<string>,
+  ): { fullName: string | null } | null {
+    if (!Array.isArray(authorizedContacts)) return null;
+
+    for (const contact of authorizedContacts) {
+      if (typeof contact === 'string') {
+        const matches = this.buildPhoneCandidates(contact).some((candidate) => phoneCandidateSet.has(candidate));
+        if (matches) return { fullName: null };
+        continue;
+      }
+
+      if (!contact || typeof contact !== 'object') continue;
+
+      const record = contact as Record<string, unknown>;
+
+      const possibleValues = [
+        'phone',
+        'whatsapp_phone',
+        'number',
+        'value',
+      ].flatMap((key) => {
+        const value = record[key];
+        return typeof value === 'string' ? [value] : [];
+      });
+
+      const matches = possibleValues.some((value) =>
+        this.buildPhoneCandidates(value).some((candidate) => phoneCandidateSet.has(candidate)),
+      );
+
+      if (!matches) continue;
+
+      const fullName = [
+        'full_name',
+        'fullName',
+        'name',
+        'contact_name',
+        'contactName',
+      ].flatMap((key) => {
+        const value = record[key];
+        return typeof value === 'string' && value.trim() ? [value.trim()] : [];
+      })[0] ?? null;
+
+      return { fullName };
+    }
+
+    return null;
   }
 
   // ─── Ponds & Batches ──────────────────────────────────────────────────────
@@ -153,7 +296,7 @@ export class SupabaseRepo {
     const { data, error } = await this.db
       .from('uploads')
       .insert({
-        user_id:           input.userId,
+        user_id:           input.userId ?? null,
         batch_id:          input.batchId ?? null,
         image_url:         input.imageUrl,
         whatsapp_provider: input.whatsappProvider,

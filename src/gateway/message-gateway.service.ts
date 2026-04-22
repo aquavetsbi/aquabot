@@ -85,7 +85,7 @@ export class MessageGatewayService {
 
   private async handleImage(
     msg: IncomingMessage,
-    user: { id: string; orgId: string },
+    user: { id: string | null; orgId: string; fullName: string | null },
   ): Promise<void> {
     const selectedPond = await this.getSelectedPond(msg.from);
     if (!selectedPond) {
@@ -172,7 +172,7 @@ export class MessageGatewayService {
 
   private async handleText(
     msg: IncomingMessage,
-    user: { id: string; orgId: string },
+    user: { id: string | null; orgId: string; fullName: string | null },
   ): Promise<void> {
     const text = msg.textBody!;
     const activeDraft = await this.draft.get(msg.from);
@@ -230,7 +230,7 @@ export class MessageGatewayService {
 
       await this.provider.sendMessage(
         this.replyTo(msg),
-        '¡Hola! 👋 Soy AquaBot, tu asistente de AquaData.\n\nEstoy listo para ayudarte con el monitoreo de tus cultivos acuícolas. Cuéntame, ¿en qué puedo asistirte hoy? 😊',
+        this.buildWelcomeMessage(user.fullName),
       );
       return;
     }
@@ -277,7 +277,7 @@ export class MessageGatewayService {
 
   private async confirmDraft(
     msg: IncomingMessage,
-    user: { id: string; orgId: string },
+    user: { id: string | null; orgId: string; fullName: string | null },
     activeDraft: OcrDraft,
   ): Promise<void> {
     const selectedPond = await this.getSelectedPond(msg.from);
@@ -367,7 +367,7 @@ export class MessageGatewayService {
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   /** Resuelve el usuario por teléfono. Retorna null si no está registrado (flujo abierto). */
-  private async resolveUser(phone: string): Promise<{ id: string; orgId: string } | null> {
+  private async resolveUser(phone: string): Promise<{ id: string | null; orgId: string; fullName: string | null } | null> {
     try {
       const existing = await this.db.findUserByPhone(phone);
       if (existing) return existing;
@@ -385,6 +385,16 @@ export class MessageGatewayService {
 
   private replyTo(msg: IncomingMessage): string {
     return msg.replyJid ?? msg.from;
+  }
+
+  private buildWelcomeMessage(fullName: string | null): string {
+    const firstName = fullName
+      ?.trim()
+      .split(/\s+/)
+      .find(Boolean);
+
+    const greeting = firstName ? `¡Hola, ${firstName}! 👋` : '¡Hola! 👋';
+    return `${greeting} Soy AquaBot, tu asistente de AquaData.\n\nEstoy listo para ayudarte con el monitoreo de tus cultivos acuicolas. Cuentame, ¿en que puedo asistirte hoy? 😊`;
   }
 
   private async downloadRemoteImage(url: string): Promise<Buffer> {
