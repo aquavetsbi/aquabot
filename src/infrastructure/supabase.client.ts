@@ -343,10 +343,13 @@ export class SupabaseRepo {
         batch_id:        input.batchId ?? null,
         upload_id:       input.uploadId,
         record_date:     d.record_date ?? new Date().toISOString().split('T')[0],
+        report_type:     d.report_type ?? 'daily',
+        week_end_date:   d.week_end_date,
 
         // Columnas existentes AquaData
         feed_kg:         d.feed_kg,
         avg_weight_kg:   avgWeightKg,
+        sampling_weight_g: d.sampling_weight_g,
         mortality_count: d.mortality_count ?? 0,
         temperature_c:   d.temperature_c,
         oxygen_mg_l:     d.oxygen_mg_l,
@@ -361,6 +364,8 @@ export class SupabaseRepo {
         phosphate_mg_l:  d.phosphate_mg_l,
         hardness_mg_l:   d.hardness_mg_l,
         alkalinity_mg_l: d.alkalinity_mg_l,
+        turbidity_ntu:   d.turbidity_ntu,
+        biomass_kg:      d.biomass_kg,
 
         review_status:   'PENDING_REVIEW',
       })
@@ -405,6 +410,28 @@ export class SupabaseRepo {
 
   async cancelUpload(uploadId: string): Promise<void> {
     await this.db.from('uploads').update({ status: 'cancelled' }).eq('id', uploadId);
+  }
+
+  async getPreviousProductionRecord(
+    batchId: string,
+    recordDate: string,
+    currentRecordId: string,
+  ): Promise<{ avg_weight_g: number | null; record_date: string } | null> {
+    const { data, error } = await this.db
+      .from('production_records')
+      .select('avg_weight_g, record_date')
+      .eq('batch_id', batchId)
+      .lt('record_date', recordDate)
+      .neq('id', currentRecordId)
+      .order('record_date', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error || !data) return null;
+    return {
+      avg_weight_g: data.avg_weight_g as number | null,
+      record_date: data.record_date as string,
+    };
   }
 
   async confirmProductionRecord(id: string, updates: Record<string, unknown>): Promise<void> {

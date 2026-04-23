@@ -15,6 +15,8 @@ export interface OcrDraft {
 const FIELD_ALIASES: Record<string, keyof Omit<OcrData, 'confidence'>> = {
   // Fecha
   fecha: 'record_date',   date: 'record_date',
+  semana: 'week_end_date', cierre: 'week_end_date', week: 'week_end_date',
+  tipo: 'report_type', reporte: 'report_type',
 
   // Estanque
   estanque: 'pond_name',  pond: 'pond_name',  tanque: 'pond_name',
@@ -27,6 +29,7 @@ const FIELD_ALIASES: Record<string, keyof Omit<OcrData, 'confidence'>> = {
 
   // Peso
   peso: 'avg_weight_g',   weight: 'avg_weight_g',
+  muestreo: 'sampling_weight_g', pesomuestreo: 'sampling_weight_g', sampling: 'sampling_weight_g',
 
   // Mortalidad
   mortalidad: 'mortality_count',  muertos: 'mortality_count',  mortality: 'mortality_count',
@@ -57,6 +60,12 @@ const FIELD_ALIASES: Record<string, keyof Omit<OcrData, 'confidence'>> = {
 
   // Alcalinidad
   alcalinidad: 'alkalinity_mg_l',  alkalinity: 'alkalinity_mg_l',
+
+  // Turbidez
+  turbidez: 'turbidity_ntu',  turbidity: 'turbidity_ntu',  ntu: 'turbidity_ntu',
+
+  // Biomasa
+  biomasa: 'biomass_kg',  biomass: 'biomass_kg',
 
   // Notas
   notas: 'notes',  observaciones: 'notes',  obs: 'notes',  notes: 'notes',
@@ -144,8 +153,15 @@ export class DraftService {
 
     if (field === 'notes' || field === 'pond_name') {
       parsed = rawValue;
+    } else if (field === 'report_type') {
+      parsed = this.parseReportType(rawValue);
+      if (!parsed) return null;
     } else if (field === 'record_date') {
       // Intentar parsear fecha en varios formatos
+      const iso = this.parseDate(rawValue);
+      if (!iso) return null;
+      parsed = iso;
+    } else if (field === 'week_end_date') {
       const iso = this.parseDate(rawValue);
       if (!iso) return null;
       parsed = iso;
@@ -184,6 +200,13 @@ export class DraftService {
       const m = value.match(re);
       if (m) return fn(...(m as [string, string, string, string]));
     }
+    return null;
+  }
+
+  private parseReportType(value: string): 'daily' | 'weekly' | null {
+    const normalized = this.normalize(value);
+    if (['daily', 'diario', 'dia', 'día'].includes(normalized)) return 'daily';
+    if (['weekly', 'semanal', 'semana'].includes(normalized)) return 'weekly';
     return null;
   }
 }

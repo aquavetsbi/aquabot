@@ -48,7 +48,11 @@ ALTER TABLE public.production_records
   ADD COLUMN IF NOT EXISTS fish_count       integer,
   ADD COLUMN IF NOT EXISTS phosphate_mg_l   numeric,
   ADD COLUMN IF NOT EXISTS hardness_mg_l    numeric,
-  ADD COLUMN IF NOT EXISTS alkalinity_mg_l  numeric;
+  ADD COLUMN IF NOT EXISTS alkalinity_mg_l  numeric,
+  ADD COLUMN IF NOT EXISTS turbidity_ntu    numeric,
+  ADD COLUMN IF NOT EXISTS biomass_kg       numeric,
+  ADD COLUMN IF NOT EXISTS adg_g_per_day    numeric,
+  ADD COLUMN IF NOT EXISTS effective_fca    numeric;
 
 ALTER TABLE public.production_records
   ALTER COLUMN batch_id DROP NOT NULL;

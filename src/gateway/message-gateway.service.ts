@@ -332,21 +332,41 @@ export class MessageGatewayService {
       return c === 0 ? ' _(no detectado)_' : ` _(⚠️ ${c}%)_`;
     };
 
+    // Biomasa: manual si existe, si no calculada desde peso × peces
+    const biomassDisplay = ((): string => {
+      if (data.biomass_kg !== null) {
+        return `${fmt(data.biomass_kg, 'kg', 'biomass_kg')}${conf('biomass_kg')}`;
+      }
+      if (data.avg_weight_g != null && data.fish_count != null) {
+        const effectivePop = data.fish_count - (data.mortality_count ?? 0);
+        if (effectivePop > 0) {
+          const calc = Math.round((data.avg_weight_g / 1000) * effectivePop * 100) / 100;
+          return `${calc} kg _(calculada)_`;
+        }
+      }
+      return '— _(no detectada)_';
+    })();
+
     const lines = [
       '📋 *Revisa los datos extraídos:*',
       '',
       `📅 Fecha:      ${fmt(data.record_date, '', 'record_date')}${conf('record_date')}`,
+      `🗂️ Tipo:       ${fmt(data.report_type, '', 'report_type')}${conf('report_type')}`,
       `🌾 Alimento:   ${fmt(data.feed_kg, 'kg', 'feed_kg')}${conf('feed_kg')}`,
       `⚖️  Peso:       ${fmt(data.avg_weight_g, 'g', 'avg_weight_g')}${conf('avg_weight_g')}`,
+      `🧪 Muestreo:   ${fmt(data.sampling_weight_g, 'g', 'sampling_weight_g')}${conf('sampling_weight_g')}`,
       `💀 Mortalidad: ${fmt(data.mortality_count, 'peces', 'mortality_count')}${conf('mortality_count')}`,
       `🌡️  Temp:       ${fmt(data.temperature_c, '°C', 'temperature_c')}${conf('temperature_c')}`,
       `💧 Oxígeno:    ${fmt(data.oxygen_mg_l, 'mg/L', 'oxygen_mg_l')}${conf('oxygen_mg_l')}`,
       `🧪 pH:         ${fmt(data.ph, '', 'ph')}${conf('ph')}`,
       `🧱 Dureza:     ${fmt(data.hardness_mg_l, 'mg/L', 'hardness_mg_l')}${conf('hardness_mg_l')}`,
       `🧫 Alcalinidad:${fmt(data.alkalinity_mg_l, 'mg/L', 'alkalinity_mg_l')}${conf('alkalinity_mg_l')}`,
+      `🌫️ Turbidez:   ${fmt(data.turbidity_ntu, 'NTU', 'turbidity_ntu')}${conf('turbidity_ntu')}`,
+      `⚖️ Biomasa:    ${biomassDisplay}`,
     ];
 
     // Añadir parámetros extra si fueron detectados
+    if (data.week_end_date !== null) lines.push(`🗓️ Semana fin: ${fmt(data.week_end_date, '', 'week_end_date')}${conf('week_end_date')}`);
     if (data.ammonia_mg_l !== null) lines.push(`⚗️  Amonio:     ${fmt(data.ammonia_mg_l, 'mg/L', 'ammonia_mg_l')}${conf('ammonia_mg_l')}`);
     if (data.nitrite_mg_l !== null) lines.push(`⚗️  Nitritos:   ${fmt(data.nitrite_mg_l, 'mg/L', 'nitrite_mg_l')}${conf('nitrite_mg_l')}`);
     if (data.nitrate_mg_l !== null) lines.push(`⚗️  Nitratos:   ${fmt(data.nitrate_mg_l, 'mg/L', 'nitrate_mg_l')}${conf('nitrate_mg_l')}`);

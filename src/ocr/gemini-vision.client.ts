@@ -41,9 +41,12 @@ export class GeminiVisionClient implements VisionClient {
                     text: `Analiza esta imagen de un reporte acuícola de campo. Extrae los siguientes datos de producción:
 
 - Fecha del registro
+- Tipo de reporte (daily/weekly)
+- Fecha final de la semana si es un reporte semanal
 - Número de peces (cantidad total en el estanque)
 - Alimento suministrado (kg)
 - Peso promedio del animal (gramos)
+- Peso de muestreo si aparece como un dato separado
 - Mortalidad (cantidad de animales muertos)
 - Temperatura del agua (grados Celsius)
 - Oxígeno disuelto (mg/L)
@@ -54,6 +57,8 @@ export class GeminiVisionClient implements VisionClient {
 - Fosfatos PO4 (mg/L)
 - Dureza total (mg/L como CaCO3) — campo opcional
 - Alcalinidad total (mg/L como CaCO3) — campo opcional
+- Turbidez (NTU) — campo opcional
+- Biomasa total del estanque (kg) — solo si aparece explícitamente en la imagen
 - Notas u observaciones
 
 La imagen puede ser un formulario manuscrito, una tabla impresa, o una hoja de registro.
@@ -61,6 +66,9 @@ Si un campo no es visible o no puedes leerlo con certeza, devuelve null para ese
 Para cada campo, asigna un nivel de confianza de 0 a 100.
 NO intentes extraer el nombre del estanque desde la imagen: devuelve siempre pond_name = null y confidence.pond_name = 0.
 Los campos de dureza y alcalinidad son opcionales; si no aparecen, devuelve null y confianza 0.
+Si el reporte no indica explícitamente si es semanal, usa report_type = "daily".
+Solo devuelve week_end_date cuando veas una fecha final de semana; de lo contrario devuelve null.
+Si ves palabras como "reporte semanal", "semana", "week", o un rango/cierre semanal, usa report_type = "weekly".
 
 IMPORTANTE: Si la fecha está en formato DD/MM/YYYY, conviértela a YYYY-MM-DD.`,
                   },

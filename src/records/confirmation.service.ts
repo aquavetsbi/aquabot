@@ -11,17 +11,22 @@ export interface ConfirmationInput {
     avg_weight_g?: number;
     mortality_count?: number;
     temperature_c?: number;
-    oxygen_mg_l?: number;     // nombre de columna existente en AquaData
+    oxygen_mg_l?: number;
     ammonia_mg_l?: number;
     nitrite_mg_l?: number;
     nitrate_mg_l?: number;
     ph?: number;
-    notes?: string;           // columna 'notes' en AquaData
+    biomass_kg?: number;
+    fish_count?: number;
+    turbidity_ntu?: number;
+    notes?: string;
   };
   /** Población actual del lote — para cálculo de biomasa y % mortalidad. */
   batchPopulation?: number;
   /** Biomasa del día anterior — para cálculo exacto de FCA. */
   biomassYesterdayKg?: number;
+  /** FCA configurado por la finca (opcional). */
+  configuredFca?: number | null;
 }
 
 export class ConfirmationService {
@@ -43,7 +48,6 @@ export class ConfirmationService {
     }
 
     // 2. Fusionar valores OCR con overrides del admin
-    // Nombres de columna según schema existente de AquaData
     const final = {
       feed_kg:         input.overrides?.feed_kg         ?? (record['feed_kg'] as number | null),
       avg_weight_g:    input.overrides?.avg_weight_g    ?? (record['avg_weight_g'] as number | null),
@@ -54,6 +58,9 @@ export class ConfirmationService {
       nitrite_mg_l:    input.overrides?.nitrite_mg_l    ?? (record['nitrite_mg_l'] as number | null),
       nitrate_mg_l:    input.overrides?.nitrate_mg_l    ?? (record['nitrate_mg_l'] as number | null),
       ph:              input.overrides?.ph              ?? (record['ph'] as number | null),
+      biomass_kg:      input.overrides?.biomass_kg      ?? (record['biomass_kg'] as number | null),
+      fish_count:      input.overrides?.fish_count      ?? (record['fish_count'] as number | null),
+      turbidity_ntu:   input.overrides?.turbidity_ntu   ?? (record['turbidity_ntu'] as number | null),
       notes:           input.overrides?.notes           ?? (record['notes'] as string | null),
     };
 
@@ -62,14 +69,30 @@ export class ConfirmationService {
     const orgId      = batchData?.ponds?.organization_id ?? '';
     const pondId     = batchData?.pond_id;
 
-    // 4. Calcular biomasa y FCA
-    const calc = this.calculations.compute(final, input.batchPopulation ?? null, input.biomassYesterdayKg ?? null);
+    // 4. Obtener registro anterior del mismo lote para ADG
+    const batchId = record['batch_id'] as string | undefined;
+    const recordDate = record['record_date'] as string | undefined;
+    const prevRecord = batchId && recordDate
+      ? await this.db.getPreviousProductionRecord(batchId, recordDate, input.recordId)
+      : null;
 
-    // 5. Confirmar registro — usa nombres de columna del schema existente
+    // 5. Calcular biomasa, FCA, ADG y FCA efectivo
+    const calc = this.calculations.compute(
+      final,
+      input.batchPopulation ?? null,
+      input.biomassYesterdayKg ?? null,
+      recordDate ?? new Date().toISOString().slice(0, 10),
+      prevRecord,
+      input.configuredFca ?? null,
+    );
+
+    // 6. Confirmar registro
     await this.db.confirmProductionRecord(input.recordId, {
       ...final,
-      calculated_biomass_kg: calc.total_biomass_kg,  // columna existente AquaData
-      calculated_fca:        calc.fca,               // columna existente AquaData
+      calculated_biomass_kg: calc.total_biomass_kg,
+      calculated_fca:        calc.fca,
+      effective_fca:         calc.effective_fca,
+      adg_g_per_day:         calc.adg_g_per_day,
     });
 
     // 6. Generar alertas
