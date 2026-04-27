@@ -25,6 +25,17 @@ export interface CreateProductionRecordInput {
   result: NormalizedOcrResult;
 }
 
+export interface CreateWaterQualityReadingInput {
+  pondId: string;
+  batchId?: string | null;
+  readingDate: string;
+  readingTime?: string | null;
+  temperatureC?: number | null;
+  oxygenMgL?: number | null;
+  notes?: string | null;
+  createdBy?: string | null;
+}
+
 export interface InsertAlertInput {
   organizationId: string;
   productionRecordId: string;
@@ -439,6 +450,28 @@ export class SupabaseRepo {
       .from('production_records')
       .update({ ...updates, review_status: 'CONFIRMED' })
       .eq('id', id);
+  }
+
+  // ─── Water Quality Readings ───────────────────────────────────────────────
+
+  async createWaterQualityReading(input: CreateWaterQualityReadingInput): Promise<{ id: string }> {
+    const { data, error } = await this.db
+      .from('water_quality_readings')
+      .insert({
+        pond_id: input.pondId,
+        batch_id: input.batchId ?? null,
+        reading_date: input.readingDate,
+        reading_time: input.readingTime ?? null,
+        temperature_c: input.temperatureC ?? null,
+        oxygen_mg_l: input.oxygenMgL ?? null,
+        notes: input.notes ?? null,
+        created_by: input.createdBy ?? null,
+      })
+      .select('id')
+      .single();
+
+    if (error) throw new Error(`createWaterQualityReading: ${error.message}`);
+    return { id: data.id as string };
   }
 
   // ─── Alerts ───────────────────────────────────────────────────────────────
