@@ -68,7 +68,10 @@ export class BaileysProvider implements WhatsAppProvider {
       version,
       auth: state,
       logger: logger.child({ component: 'baileys' }) as Parameters<typeof makeWASocket>[0]['logger'],
-      syncFullHistory: true,
+      // ponytail: full history sync saturates the socket/event loop and causes
+      // reconnect loops → slow/no responses. We only need contact mapping, which
+      // still arrives via contacts.upsert / messaging-history.set.
+      syncFullHistory: false,
       markOnlineOnConnect: false,
     });
 

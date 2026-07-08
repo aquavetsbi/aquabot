@@ -25,6 +25,10 @@ interface WqSession {
 }
 const REPORT_POND_SELECTION_TTL_SEC = 15 * 60;
 const SELECTED_POND_TTL_SEC = 6 * 60 * 60;
+// Operators walk between ponds mid-flow; keep the conversational session alive
+// long enough that idle gaps don't reset them back to the welcome message.
+const WQ_SESSION_TTL_SEC = 60 * 60;
+const USER_CACHE_TTL_SEC = 10 * 60;
 
 export class MessageGatewayService {
   constructor(
@@ -631,15 +635,25 @@ export class MessageGatewayService {
 
   /** Resuelve el usuario por teléfono. Retorna null si no está registrado (flujo abierto). */
   private async resolveUser(phone: string): Promise<{ id: string | null; orgId: string; fullName: string | null } | null> {
+    const cacheKey = `user:phone:${phone}`;
     try {
-      const existing = await this.db.findUserByPhone(phone);
-      if (existing) return existing;
+      const cached = await this.redis.get(cacheKey);
+      if (cached) return JSON.parse(cached) as { id: string | null; orgId: string; fullName: string | null };
+    } catch {
+      // cache miss/parse error → fall through to DB
+    }
 
-      if (config.SUPABASE_DEFAULT_ORG_ID) {
-        return await this.db.upsertProfileByPhone(phone, config.SUPABASE_DEFAULT_ORG_ID);
+    try {
+      let resolved = await this.db.findUserByPhone(phone);
+      if (!resolved && config.SUPABASE_DEFAULT_ORG_ID) {
+        resolved = await this.db.upsertProfileByPhone(phone, config.SUPABASE_DEFAULT_ORG_ID);
       }
 
-      return null;
+      // Only cache resolved users — never cache "unregistered" so access can be granted without a wait.
+      if (resolved) {
+        await this.redis.set(cacheKey, JSON.stringify(resolved), { ttlSeconds: USER_CACHE_TTL_SEC });
+      }
+      return resolved;
     } catch (err) {
       logger.error({ err, phone }, 'Failed to resolve or auto-register WhatsApp user');
       return null;
@@ -779,7 +793,7 @@ export class MessageGatewayService {
 
   private async saveWqSession(phone: string, session: WqSession): Promise<void> {
     await this.redis.set(this.wqSessionKey(phone), JSON.stringify(session), {
-      ttlSeconds: REPORT_POND_SELECTION_TTL_SEC,
+      ttlSeconds: WQ_SESSION_TTL_SEC,
     });
   }
 
