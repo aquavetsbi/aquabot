@@ -49,11 +49,13 @@ export class RedisClient {
    * Usado para rate limiting por operario.
    */
   async incrementWithTtl(key: string, ttlSeconds: number): Promise<number> {
-    const multi = this.client.multi();
-    multi.incr(key);
-    multi.expire(key, ttlSeconds);
-    const results = await multi.exec();
-    return results[0] as number;
+    // Fixed window: set the TTL only when the counter is first created.
+    // Setting EXPIRE on every increment slides the window forward and the
+    // counter never resets while the user keeps sending — dropping messages
+    // mid-conversation.
+    const count = await this.client.incr(key);
+    if (count === 1) await this.client.expire(key, ttlSeconds);
+    return count;
   }
 
   /** Encola un job (LPUSH). */

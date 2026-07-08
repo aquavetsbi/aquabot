@@ -9,7 +9,9 @@ import { BotError } from '../shared/errors';
 import { logger } from '../shared/logger';
 import { config } from '../config';
 
-const RATE_LIMIT_PER_MIN = 10;
+// Guided flows drive rapid back-and-forth (type → pond → temp → oxygen → time
+// → confirm, plus retries), so keep this well above a normal conversation.
+const RATE_LIMIT_PER_MIN = 30;
 
 interface WqSession {
   step: 'pond' | 'temperature' | 'oxygen' | 'reading_time' | 'confirm';
@@ -65,7 +67,10 @@ export class MessageGatewayService {
   private async processMessage(msg: IncomingMessage): Promise<void> {
     // ── 1. Rate limiting ──────────────────────────────────────────────────
     const count = await this.redis.incrementWithTtl(`rate:limit:${msg.from}`, 60);
-    if (count > RATE_LIMIT_PER_MIN) return;
+    if (count > RATE_LIMIT_PER_MIN) {
+      logger.warn({ from: msg.from, count }, 'Rate limit exceeded — message dropped');
+      return;
+    }
 
     // ── 2. Deduplicación ──────────────────────────────────────────────────
     const dedupKey = `dedup:msg:${msg.providerType}:${msg.id}`;
